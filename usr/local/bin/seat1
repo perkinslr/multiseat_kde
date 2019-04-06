@@ -3,7 +3,7 @@
 
 config = dict(
     # User settings
-    USER='jeanie',
+    USER='localuser',
     XDG_SEAT='seat1',
     
     # Session settings
