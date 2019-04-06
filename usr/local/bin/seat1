@@ -1,0 +1,200 @@
+#!/usr/bin/python3
+
+
+config = dict(
+    # User settings
+    USER='jeanie',
+    XDG_SEAT='seat1',
+    
+    # Session settings
+    COMMAND=['bash', '-l', '-c', '$HOME/bin/startw'],
+    RESET_PATH=True,
+    
+    # System settings
+    XDG_RUNTIME_DIR='/run/user/%(UID)i',
+    XDG_SESSION_TYPE='wayland',
+    PAM_MODULE='multiseat',
+    MAKE_PAM=False,
+    PAM_D='/etc/pam.d',
+    PAM_INCLUDE='<security/pam_appl.h>',
+    LOGFILE_DIR='/var/log/seats',
+    LOGFILE='%(LOGFILE_DIR)s/%(XDG_SEAT)s',
+    PIDFILES='/var/run/seats/',
+    
+    # Calculated values
+    # HOME
+    # PATH
+    # UID
+    # GID
+)
+
+
+
+import os
+import subprocess
+import sys
+import cffi
+import re
+import signal
+import time
+
+def do_fork():
+    pid = os.fork()
+    if pid:
+        if not os.path.exists(config['PIDFILES']):
+            os.mkdir(config['PIDFILES'])
+        with open(config['PIDFILES'] + config['XDG_SEAT'] + '.pid', 'w') as f:
+            print(pid, file=f)
+        raise SystemExit(0)
+    
+    #print(config['LOGFILE'])
+    
+    #os.close(1)
+    #os.close(2)
+    #if not os.path.exists(config['LOGFILE_DIR']):
+    #    os.mkdir(config['LOGFILE_DIR'])
+    
+    
+    #os.open(config['LOGFILE'], os.O_WRONLY | os.O_APPEND)
+    
+    #os.dup(1)
+    
+    #print(63)
+    
+    #os.close(0)
+
+def setup_env():
+    for var in ['USER', 'XDG_SEAT', 'XDG_RUNTIME_DIR', 'XDG_SESSION_TYPE', 'HOME', 'PATH', 'SHELL']:
+        os.environ[var] = config[var]
+
+def parse_headers(ffi):
+    p = subprocess.Popen(['gcc', '-E', '-'], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+    p.stdin.write(('#include %(PAM_INCLUDE)s\n' % config).encode())
+    p.stdin.close()
+    
+    headers = re.sub("#.*?(\n|$)", "\n", p.stdout.read().decode())
+    headers = re.sub('__attribute__\(\(__nonnull__ \(.*?\)\)\)', ' ', headers, flags=re.MULTILINE)
+    ffi.cdef(headers)
+    ffi.cdef('int setresuid(int, int, int);')
+    ffi.cdef('int setresgid(int, int, int);')
+
+def get_libraries(ffi):
+    libc = ffi.dlopen('c')
+    libpam = ffi.dlopen('pam')
+    return libc, libpam
+
+def new_session(ffi, libpam):
+    handle = ffi.new('pam_handle_t**')
+    conv = ffi.new('struct pam_conv*')
+    
+    libpam.pam_start(config['PAM_MODULE'].encode(), config['USER'].encode(), conv, handle)
+    libpam.pam_open_session(handle[0], 0)
+    return handle, conv
+
+def cleanup_pam(libpam, handle):
+    libpam.pam_close_session(handle[0], 0)
+    libpam.pam_end(handle[0], 0)
+
+def get_uid_gid():
+    with open('/etc/passwd') as f:
+        for line in f:
+            if line.strip():
+                if line.startswith(config['USER']+':'):
+                    user, pw, uid, gid, comment, home, shell = line.split(':')
+                    if user == config['USER']:
+                        uid = int(uid)
+                        gid = int(gid)
+                        config['HOME'] = home
+                        config['UID'] = uid
+                        config['GID'] = gid
+                        if shell.strip() != '/bin/bash':
+                            print("cannot launch with non bash shell")
+                            raise SystemExit(1)
+                        config['SHELL'] = '/bin/bash'
+
+def get_path():
+    if config['RESET_PATH']:
+        path = os.environ['PATH'].split(':')
+        
+        outpath = []
+        for i in path:
+            if i in ['/usr/local/bin', '/usr/bin', '/bin', '/usr/local/sbin', '/usr/sbin', '/sbin']:
+                outpath.append(i)
+        config['PATH'] = str.join(':', outpath)
+    else:
+        config['PATH'] = os.environ['PATH']
+
+def change_user(libc):
+    os.initgroups(config['USER'], config['GID'])
+    libc.setresgid(config['GID'], config['GID'], config['GID'])
+    libc.setresuid(config['UID'], config['UID'], config['UID'])
+
+def run_program():
+    child = subprocess.Popen(config['COMMAND'])
+    setup_signal(child)
+    child.wait()
+
+def setup_signal(child):
+    def handler(signum, frame):
+        print(signum)
+        if child.poll() is None:
+            child.send_signal(signum)
+    
+    signal.signal(2, handler)
+    signal.signal(8, handler)
+    signal.signal(15, handler)
+
+def complete_config():
+    get_uid_gid()
+    get_path()
+    for var, val in config.items():
+        if isinstance(val, str) and '%' in val:
+            config[var] = val % config
+
+def get_session():
+    p = subprocess.Popen(['loginctl', 'session-status'], stdout=subprocess.PIPE)
+    p.wait()
+    status = p.stdout.read().decode()
+    session = status.split('\n', 1)[0].split(' ', 1)[0]
+    leader = int(status.split('Leader: ', 1)[1].split('\n', 1)[0])
+    if leader != os.getpid():
+        print("somehow we're not the session leader")
+    return session
+    
+
+def make_pam():
+    if not config['MAKE_PAM']:
+        return
+    pam_path = config['PAM_D']+'/'+config['PAM_MODULE']
+    if not os.path.exists(pam_path):
+        with open(pam_path, 'w') as f:
+            f.write("""
+auth       include      system-local-login
+account    include      system-local-login
+password   include      system-local-login
+session required pam_loginuid.so
+session required pam_keyinit.so force revoke
+session required pam_elogind.so
+""")
+
+
+if __name__=='__main__':
+    make_pam()
+    complete_config()
+    
+    do_fork()
+
+    ffi = cffi.FFI()
+    
+    parse_headers(ffi)
+    libc, libpam = get_libraries(ffi)
+    
+    setup_env()
+    
+    handle, conv = new_session(ffi, libpam)
+    change_user(libc)
+    session = get_session()
+    run_program()
+    print("terminating all remaining processes in session")
+    os.system('loginctl kill-session %s' %session)
+    cleanup_pam(libpam, handle)

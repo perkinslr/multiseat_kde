@@ -1,0 +1,41 @@
+#!/usr/bin/python
+
+import subprocess
+import signal
+import time
+import os
+
+dbus = subprocess.Popen(['/usr/bin/dbus-launch'], stdout=subprocess.PIPE, stdin=subprocess.PIPE)
+dbus.wait()
+
+vars = dbus.stdout.read().decode()
+for var in vars.split('\n'):
+	if not var.strip():
+		continue
+	var,val = var.split('=', 1)
+	os.environ[var] = val
+	if var == 'DBUS_SESSION_BUS_PID':
+		dbus_pid = int(val)
+
+plasma = subprocess.Popen(['bash', '-l'], stdin=subprocess.PIPE)
+plasma.stdin.write(b'. /etc/profile\n')
+plasma.stdin.write(b'startplasmacompositor\n')
+plasma.stdin.flush()
+
+def handle(signum, frame):
+	plasma.send_signal(signum)
+
+
+signal.signal(2, handle)
+signal.signal(8, handle)
+signal.signal(15, handle)
+
+plasma.wait()
+
+print("plasma shut down")
+try:
+	print(dbus_pid)
+	os.kill(dbus_pid, 15)
+except (ProcessLookupError, PermissionError) as e:
+	print("cannot shut down dbus")
+

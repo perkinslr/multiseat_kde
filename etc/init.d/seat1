@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+depend() {
+	need localmount logger dbus
+#	after seat0
+}
+
+start() {
+	ebegin "Starting seat1"
+	start-stop-daemon --start --quiet --pidfile /var/run/seats/seat1.pid --stdout /var/log/seats/seat1 --stderr /var/log/seats/seat1 --background \
+		--exec /usr/local/bin/seat1 
+	eend $? "Failed to start seat1"
+}
+
+stop() {
+	ebegin "Stopping seat1"
+	start-stop-daemon --stop --quiet --pidfile /var/run/seats/seat1.pid 
+	eend $? "Failed to stop seat1"
+}
